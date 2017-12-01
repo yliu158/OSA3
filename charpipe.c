@@ -3,16 +3,12 @@
 #include <linux/device.h>         // Header to support the kernel Driver Model
 #include <linux/kernel.h>         // Contains types, macros, functions for the kernel
 #include <linux/fs.h>             // Header for the Linux file system support
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <semaphore.h> 
-
-#define POSIX_IPC_NAME_PREFIX "/yang-"
-#define EMPTY_SEM_NAME POSIX_IPC_NAME_PREFIX "nemptysem"
-#define FULL_SEM_NAME POSIX_IPC_NAME_PREFIX "nfullsem"
+#include <linux/semaphore.h> 
 
 MODULE_LICENSE("GPL");            ///< The license type -- this affects available functionality
 MODULE_AUTHOR("Yang Liu");    ///< The author -- visible when you use modinfo
@@ -25,28 +21,41 @@ MODULE_AUTHOR("Yang Liu");    ///< The author -- visible when you use modinfo
 //   loff_t * off);
 // static int my_close(struct miscdevice* my_misc_device, struct file *filep);
 
-static int fildes[2];
 static int pipe_size;
-static sem_t *sem_notempty;
-static sem_t *sem_notfull;
+static int *myqueue;
+static int start;
+static int end;
+static int buf;
+static int error;
+static struct semaphore sem_notempty;
+static struct semaphore sem_notfull;
+static struct semaphore mutex;
+static void pushQueue(const int num){
+  myqueue[end] = num; end = (end+1)%pipe_size;
+}
+static int popQueue(void){
+  int cur = myqueue[start];
+  start = (start+1)%pipe_size;
+  return cur;
+}
 
-static ssize_t my_read(
-  struct file *file,
-  char __user * out,
-  size_t size,
-  loff_t * off) {
-    if(sem_wait(sem_notempty)<0)return -1;
-    char buf[1];
-    read(fildes[0],buf, 1);
-    put_user(buf, out);
-    if(sem_post(sem_notfull)<0)return -1;
+static ssize_t my_read(struct file *file, char __user * out, size_t size, loff_t * off) {
+    down(&sem_notempty);
+    down(&mutex);
+    buf = popQueue();
+    error = copy_to_user(out, &buf, (unsigned long)(sizeof(int)));
+    up(&mutex);
+    up(&sem_notfull);
     return 1;
 }
 
-ssize_t my_write (struct file *file, const char __user *in, size_t, size, loff_t *off){
-  if(sem_wait(sem_notfull)<0)return -1;
-    write(fildes[1], in, 1);
-    if(sem_post(sem_notempty)<0)return -1;
+static ssize_t my_write (struct file *file, const char __user *in, size_t size, loff_t *off){
+    down(&sem_notfull);
+    down(&mutex);
+    error = copy_from_user(&buf, in, sizeof(int));
+    pushQueue(buf);
+    up(&mutex);
+    up(&sem_notempty);
     return 1;
 }
 
@@ -55,7 +64,7 @@ static int my_open (struct inode * id, struct file * filep){
   return 0;
 }
 
-static int my_close (struct file *, fl_owner_t id); {
+static int my_close (struct file * filep, fl_owner_t id){
   printk(KERN_ALERT "Char Device successfully closed.\n");
   return 0;
 }
@@ -76,21 +85,18 @@ static struct miscdevice charpipe = {
 
 static int __init my_init(void) {
   printk(KERN_ALERT "Init Char Pipe sucessfully.\n");
-  sem_notempty= sem_open(NEMPTY_SEM_NAME,O_RDWR|O_CREAT,ALL_RW_PERMS, 0);
-  sem_notfull= sem_open(NFULL_SEM_NAME,O_RDWR|O_CREAT,ALL_RW_PERMS, pipe_size);  
-  if(pipe(fildes)==-1){
-    return -1;
-  }
+  sema_init(&sem_notempty, 0);
+  sema_init(&sem_notfull, pipe_size); 
+  sema_init(&mutex, 1);
+  myqueue = (int *)kmalloc(pipe_size*sizeof(int), GFP_KERNEL);
+  start = 0; end=0;
   misc_register(&charpipe);
   return 0;
 }
 
 static void __exit my_exit(void) {
   misc_deregister(&charpipe);
-  sem_close(sem_notempty);
-  sem_close(sem_notfull);
-  close(fildes[0]);
-  close(fildes[1]);
+  kfree(myqueue);
   printk(KERN_ALERT "Exit Char Pipe.\n");
 }
 
