@@ -8,6 +8,7 @@
 #include <linux/miscdevice.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
+#include </linux/wait.h>
 #include <linux/semaphore.h> 
 
 MODULE_LICENSE("GPL");            ///< The license type -- this affects available functionality
@@ -26,10 +27,11 @@ static int *myqueue;
 static int start;
 static int end;
 static int buf;
-static int error;
+static int error=0;
 static struct semaphore sem_notempty;
 static struct semaphore sem_notfull;
 static struct semaphore mutex;
+
 static void pushQueue(const int num){
   myqueue[end] = num; end = (end+1)%pipe_size;
 }
@@ -40,23 +42,45 @@ static int popQueue(void){
 }
 
 static ssize_t my_read(struct file *file, char __user * out, size_t size, loff_t * off) {
-    down(&sem_notempty);
-    down(&mutex);
-    buf = popQueue();
+    int myerr = 0;
+    myerr = down_interruptible(&sem_notempty);
+    if(myerr<0)return -1;
+    myerr = 0;
+    myerr = down_interruptible(&mutex);
+    if(myerr<0){
+      up(sem_notempty);
+      return -1;
+    }
+    buf = myqueue[start];
     error = copy_to_user(out, &buf, (unsigned long)(sizeof(int)));
+    if(error<0){
+      up(&mutex);
+      return -1;
+    }
+    buf = popQueue();
     up(&mutex);
     up(&sem_notfull);
-    return 1;
+    return sizeof(int);
 }
 
 static ssize_t my_write (struct file *file, const char __user *in, size_t size, loff_t *off){
-    down(&sem_notfull);
-    down(&mutex);
+    int myerr = 0;
+    myerr = down_interruptible(&sem_notfull);
+    if(myerr<0)return -1;
+    myerr = 0;
+    myerr = down_interruptible(&mutex);
+    if(myerr<0){
+      up(sem_notfull);
+      return -1;
+    }
     error = copy_from_user(&buf, in, sizeof(int));
+    if(error<0){ 
+      up(&mutex);return -1;
+    }
     pushQueue(buf);
     up(&mutex);
     up(&sem_notempty);
-    return 1;
+    return sizeof(int);
 }
 
 static int my_open (struct inode * id, struct file * filep){
