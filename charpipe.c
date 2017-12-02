@@ -54,6 +54,7 @@ static ssize_t my_read(struct file *file, char __user * out, size_t size, loff_t
     buf = myqueue[start];
     error = copy_to_user(out, &buf, (unsigned long)(sizeof(int)));
     if(error<0){
+      up(&sem_notempty);
       up(&mutex);
       return -1;
     }
@@ -65,6 +66,8 @@ static ssize_t my_read(struct file *file, char __user * out, size_t size, loff_t
 
 static ssize_t my_write (struct file *file, const char __user *in, size_t size, loff_t *off){
     int myerr = 0;
+    error = copy_from_user(&buf, in, sizeof(int));
+    if(error<0)return -1;
     myerr = down_interruptible(&sem_notfull);
     if(myerr<0)return -1;
     myerr = 0;
@@ -72,10 +75,6 @@ static ssize_t my_write (struct file *file, const char __user *in, size_t size, 
     if(myerr<0){
       up(sem_notfull);
       return -1;
-    }
-    error = copy_from_user(&buf, in, sizeof(int));
-    if(error<0){ 
-      up(&mutex);return -1;
     }
     pushQueue(buf);
     up(&mutex);
